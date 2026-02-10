@@ -81,6 +81,42 @@ const buildConstants = (type, additional = {}) => ({
   },
 });
 
+/**
+ * Plugin that reads existing source maps from dependency files and provides
+ * them to Rollup so they are properly chained through the transform pipeline.
+ * Without this, Rollup's output source maps reference the compiled .js files
+ * from dependencies instead of their original sources, and include
+ * //# sourceMappingURL comments in sourcesContent that cause downstream tools
+ * to attempt to resolve missing .map files (see #7718).
+ */
+const loadDependencySourceMaps = (include) => ({
+  name: 'load-dependency-source-maps',
+  load(id) {
+    if (!include.test(id)) return null;
+
+    let code;
+    try {
+      code = fs.readFileSync(id, 'utf-8');
+    } catch {
+      return null;
+    }
+
+    const match = code.match(/\/\/[#@]\s*sourceMappingURL=([^\s]+)\s*$/m);
+    if (!match || match[1].startsWith('data:')) return null;
+
+    const mapPath = path.resolve(path.dirname(id), match[1]);
+    try {
+      const map = JSON.parse(fs.readFileSync(mapPath, 'utf-8'));
+      // Strip the sourceMappingURL comment since the map is now provided
+      // separately to Rollup for proper source map chaining
+      code = code.replace(/\/\/[#@]\s*sourceMappingURL=[^\s]+\s*$/m, '');
+      return { code, map };
+    } catch {
+      return null;
+    }
+  },
+});
+
 const buildOnLog = ({ allowCircularDeps } = {}) => {
   return (level, log, handler) => {
     if (allowCircularDeps && log.code === 'CIRCULAR_DEPENDENCY') return;
@@ -198,6 +234,7 @@ const buildBabelEsm = ({ stripConsole }) =>
   babelTsWithPresetEnvTargets({ targets: { esmodules: true }, stripConsole });
 
 const basePlugins = [
+  loadDependencySourceMaps(/node_modules\/@svta\//),
   nodeResolve({
     extensions,
     browser: true,
